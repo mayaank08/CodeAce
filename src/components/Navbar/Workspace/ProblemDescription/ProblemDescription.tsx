@@ -9,6 +9,12 @@ import { AiFillLike, AiFillDislike, AiOutlineLoading3Quarters, AiFillStar } from
 import { BsCheck2Circle } from "react-icons/bs";
 import { TiStarOutline } from "react-icons/ti";
 import { toast } from "react-toastify";
+import { Discussion, UserAnalytics, LeaderboardEntry } from "@/utils/types/problem";
+import { FaComments, FaChartLine, FaTrophy } from "react-icons/fa";
+import DiscussionList from "./DiscussionList";
+import Analytics from "./Analytics";
+import Leaderboard from "./Leaderboard";
+import { collection, query, where, getDocs, orderBy, limit, addDoc, serverTimestamp, increment } from "firebase/firestore";
 
 type ProblemDescriptionProps = {
 	problem: Problem;
@@ -20,6 +26,27 @@ const ProblemDescription: React.FC<ProblemDescriptionProps> = ({ problem, _solve
 	const { currentProblem, loading, problemDifficultyClass, setCurrentProblem } = useGetCurrentProblem(problem.id);
 	const { liked, disliked, solved, setData, starred } = useGetUsersDataOnProblem(problem.id);
 	const [updating, setUpdating] = useState(false);
+	const [activeTab, setActiveTab] = useState<'description' | 'discussion' | 'analytics' | 'leaderboard'>('description');
+	const [discussions, setDiscussions] = useState<Discussion[]>([]);
+	const [analytics, setAnalytics] = useState<UserAnalytics>({
+		userId: "",
+		problemsSolved: 0,
+		totalTimeSpent: 0,
+		averageTimePerProblem: 0,
+		successRate: 0,
+		difficultyBreakdown: {
+			easy: 0,
+			medium: 0,
+			hard: 0
+		},
+		streakDays: 0,
+		points: 0,
+		rank: "",
+		badges: []
+	});
+	const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
+	const [newDiscussionContent, setNewDiscussionContent] = useState("");
+	const [showNewDiscussion, setShowNewDiscussion] = useState(false);
 
 	const returnUserDataAndProblemData = async (transaction: any) => {
 		const userRef = doc(firestore, "users", user!.uid);
@@ -153,116 +180,484 @@ const ProblemDescription: React.FC<ProblemDescriptionProps> = ({ problem, _solve
 		setUpdating(false);
 	};
 
+	useEffect(() => {
+		// Fetch discussions
+		const fetchDiscussions = async () => {
+			const discussionsRef = collection(firestore, "discussions");
+			const q = query(discussionsRef, where("problemId", "==", problem.id));
+			const querySnapshot = await getDocs(q);
+			const discussionsData = querySnapshot.docs.map(doc => ({
+				id: doc.id,
+				...doc.data()
+			})) as Discussion[];
+			setDiscussions(discussionsData);
+		};
+
+		// Fetch analytics
+		const fetchAnalytics = async () => {
+			if (!user) return;
+			const analyticsRef = doc(firestore, "analytics", user.uid);
+			const analyticsDoc = await getDoc(analyticsRef);
+			if (analyticsDoc.exists()) {
+				setAnalytics(analyticsDoc.data() as UserAnalytics);
+			}
+		};
+
+		// Fetch leaderboard
+		const fetchLeaderboard = async () => {
+			const leaderboardRef = collection(firestore, "leaderboard");
+			const q = query(leaderboardRef, orderBy("points", "desc"), limit(10));
+			const querySnapshot = await getDocs(q);
+			const leaderboardData = querySnapshot.docs.map((doc, index) => {
+				const data = doc.data();
+				return {
+					userId: doc.id,
+					userName: data.userName,
+					points: data.points,
+					problemsSolved: data.problemsSolved,
+					streakDays: data.streakDays,
+					rank: index + 1
+				} as LeaderboardEntry;
+			});
+			setLeaderboardEntries(leaderboardData);
+		};
+
+		fetchDiscussions();
+		fetchAnalytics();
+		fetchLeaderboard();
+	}, [problem.id, user]);
+
+	const handleCreateDiscussion = async () => {
+		if (!user) {
+			toast.error("You must be logged in to create a discussion");
+			return;
+		}
+		if (!newDiscussionContent.trim()) {
+			toast.error("Discussion content cannot be empty");
+			return;
+		}
+
+		try {
+			const discussionsRef = collection(firestore, "discussions");
+			await addDoc(discussionsRef, {
+				problemId: problem.id,
+				userId: user.uid,
+				userName: user.displayName || "Anonymous",
+				content: newDiscussionContent,
+				votes: 0,
+				createdAt: serverTimestamp(),
+				replies: []
+			});
+
+			setNewDiscussionContent("");
+			setShowNewDiscussion(false);
+			toast.success("Discussion created successfully!");
+			
+			// Refresh discussions
+			const q = query(discussionsRef, where("problemId", "==", problem.id));
+			const querySnapshot = await getDocs(q);
+			const discussionsData = querySnapshot.docs.map(doc => ({
+				id: doc.id,
+				...doc.data()
+			})) as Discussion[];
+			setDiscussions(discussionsData);
+		} catch (error) {
+			toast.error("Failed to create discussion");
+		}
+	};
+
+	const handleVote = async (discussionId: string) => {
+		if (!user) {
+			toast.error("You must be logged in to vote");
+			return;
+		}
+
+		try {
+			const discussionRef = doc(firestore, "discussions", discussionId);
+			await runTransaction(firestore, async (transaction) => {
+				const discussionDoc = await transaction.get(discussionRef);
+				if (!discussionDoc.exists()) {
+					throw new Error("Discussion does not exist");
+				}
+
+				const discussionData = discussionDoc.data();
+				const votedBy = discussionData.votedBy || [];
+				
+				if (votedBy.includes(user.uid)) {
+					// Remove vote
+					transaction.update(discussionRef, {
+						votes: increment(-1),
+						votedBy: arrayRemove(user.uid)
+					});
+				} else {
+					// Add vote
+					transaction.update(discussionRef, {
+						votes: increment(1),
+						votedBy: arrayUnion(user.uid)
+					});
+				}
+			});
+
+			// Refresh discussions
+			const discussionsRef = collection(firestore, "discussions");
+			const q = query(discussionsRef, where("problemId", "==", problem.id));
+			const querySnapshot = await getDocs(q);
+			const discussionsData = querySnapshot.docs.map(doc => ({
+				id: doc.id,
+				...doc.data()
+			})) as Discussion[];
+			setDiscussions(discussionsData);
+		} catch (error) {
+			toast.error("Failed to vote");
+		}
+	};
+
+	const handleReply = async (discussionId: string, content: string) => {
+		if (!user) {
+			toast.error("You must be logged in to reply");
+			return;
+		}
+		if (!content.trim()) {
+			toast.error("Reply content cannot be empty");
+			return;
+		}
+
+		try {
+			const discussionRef = doc(firestore, "discussions", discussionId);
+			const reply = {
+				id: crypto.randomUUID(),
+				discussionId,
+				userId: user.uid,
+				userName: user.displayName || "Anonymous",
+				content,
+				votes: 0,
+				createdAt: serverTimestamp()
+			};
+
+			await runTransaction(firestore, async (transaction) => {
+				const discussionDoc = await transaction.get(discussionRef);
+				if (!discussionDoc.exists()) {
+					throw new Error("Discussion does not exist");
+				}
+
+				const discussionData = discussionDoc.data();
+				const replies = discussionData.replies || [];
+				transaction.update(discussionRef, {
+					replies: [...replies, reply]
+				});
+			});
+
+			// Refresh discussions
+			const discussionsRef = collection(firestore, "discussions");
+			const q = query(discussionsRef, where("problemId", "==", problem.id));
+			const querySnapshot = await getDocs(q);
+			const discussionsData = querySnapshot.docs.map(doc => ({
+				id: doc.id,
+				...doc.data()
+			})) as Discussion[];
+			setDiscussions(discussionsData);
+		} catch (error) {
+			toast.error("Failed to post reply");
+		}
+	};
+
+	// Update analytics when problem is solved
+	useEffect(() => {
+		const updateAnalytics = async () => {
+			if (!user || !_solved) return;
+
+			try {
+				const analyticsRef = doc(firestore, "analytics", user.uid);
+				await runTransaction(firestore, async (transaction) => {
+					const analyticsDoc = await transaction.get(analyticsRef);
+					if (!analyticsDoc.exists()) {
+						// Initialize analytics for new user
+						transaction.set(analyticsRef, {
+							userId: user.uid,
+							problemsSolved: 1,
+							totalTimeSpent: 0,
+							averageTimePerProblem: 0,
+							successRate: 100,
+							difficultyBreakdown: {
+								easy: currentProblem?.difficulty === "Easy" ? 1 : 0,
+								medium: currentProblem?.difficulty === "Medium" ? 1 : 0,
+								hard: currentProblem?.difficulty === "Hard" ? 1 : 0
+							},
+							streakDays: 1,
+							points: 10,
+							rank: "Beginner",
+							badges: []
+						});
+
+						// Initialize leaderboard entry
+						const leaderboardRef = doc(firestore, "leaderboard", user.uid);
+						transaction.set(leaderboardRef, {
+							userId: user.uid,
+							userName: user.displayName || "Anonymous",
+							points: 10,
+							problemsSolved: 1,
+							streakDays: 1
+						});
+					} else {
+						const analyticsData = analyticsDoc.data();
+						const newProblemsSolved = analyticsData.problemsSolved + 1;
+						const difficulty = currentProblem?.difficulty.toLowerCase() || "easy";
+						
+						// Update difficulty breakdown
+						const difficultyBreakdown = {
+							...analyticsData.difficultyBreakdown,
+							[difficulty]: (analyticsData.difficultyBreakdown[difficulty] || 0) + 1
+						};
+
+						// Calculate new points (10 points per problem)
+						const newPoints = analyticsData.points + 10;
+
+						// Update rank based on points
+						let newRank = analyticsData.rank;
+						if (newPoints >= 1000) newRank = "Master";
+						else if (newPoints >= 500) newRank = "Expert";
+						else if (newPoints >= 200) newRank = "Advanced";
+						else if (newPoints >= 50) newRank = "Intermediate";
+
+						transaction.update(analyticsRef, {
+							problemsSolved: newProblemsSolved,
+							difficultyBreakdown,
+							points: newPoints,
+							rank: newRank,
+							successRate: Math.round((newProblemsSolved / (analyticsData.totalAttempts || 1)) * 100)
+						});
+
+						// Update leaderboard entry
+						const leaderboardRef = doc(firestore, "leaderboard", user.uid);
+						transaction.update(leaderboardRef, {
+							points: newPoints,
+							problemsSolved: newProblemsSolved
+						});
+					}
+				});
+
+				// Refresh analytics and leaderboard
+				const analyticsDoc = await getDoc(analyticsRef);
+				if (analyticsDoc.exists()) {
+					setAnalytics(analyticsDoc.data() as UserAnalytics);
+				}
+
+				const leaderboardRef = collection(firestore, "leaderboard");
+				const q = query(leaderboardRef, orderBy("points", "desc"), limit(10));
+				const querySnapshot = await getDocs(q);
+				const leaderboardData = querySnapshot.docs.map((doc, index) => {
+					const data = doc.data();
+					return {
+						userId: doc.id,
+						userName: data.userName,
+						points: data.points,
+						problemsSolved: data.problemsSolved,
+						streakDays: data.streakDays,
+						rank: index + 1
+					} as LeaderboardEntry;
+				});
+				setLeaderboardEntries(leaderboardData);
+			} catch (error) {
+				console.error("Failed to update analytics:", error);
+			}
+		};
+
+		updateAnalytics();
+	}, [_solved, user, currentProblem]);
+
 	return (
 		<div className='bg-dark-layer-1'>
 			{/* TAB */}
 			<div className='flex h-11 w-full items-center pt-2 bg-dark-layer-2 text-white overflow-x-hidden'>
-				<div className={"bg-dark-layer-1 rounded-t-[5px] px-5 py-[10px] text-xs cursor-pointer"}>
+				<div 
+					className={`${activeTab === 'description' ? 'bg-dark-layer-1' : ''} rounded-t-[5px] px-5 py-[10px] text-xs cursor-pointer`}
+					onClick={() => setActiveTab('description')}
+				>
 					Description
+				</div>
+				<div 
+					className={`${activeTab === 'discussion' ? 'bg-dark-layer-1' : ''} rounded-t-[5px] px-5 py-[10px] text-xs cursor-pointer flex items-center gap-2`}
+					onClick={() => setActiveTab('discussion')}
+				>
+					<FaComments /> Discussion
+				</div>
+				<div 
+					className={`${activeTab === 'analytics' ? 'bg-dark-layer-1' : ''} rounded-t-[5px] px-5 py-[10px] text-xs cursor-pointer flex items-center gap-2`}
+					onClick={() => setActiveTab('analytics')}
+				>
+					<FaChartLine /> Analytics
+				</div>
+				<div 
+					className={`${activeTab === 'leaderboard' ? 'bg-dark-layer-1' : ''} rounded-t-[5px] px-5 py-[10px] text-xs cursor-pointer flex items-center gap-2`}
+					onClick={() => setActiveTab('leaderboard')}
+				>
+					<FaTrophy /> Leaderboard
 				</div>
 			</div>
 
 			<div className='flex px-0 py-4 h-[calc(100vh-94px)] overflow-y-auto'>
-				<div className='px-5'>
-					{/* Problem heading */}
-					<div className='w-full'>
-						<div className='flex space-x-4'>
-							<div className='flex-1 mr-2 text-lg text-white font-medium'>{problem?.title}</div>
-						</div>
-						{!loading && currentProblem && (
-							<div className='flex items-center mt-3'>
-								<div
-									className={`${problemDifficultyClass} inline-block rounded-[21px] bg-opacity-[.15] px-2.5 py-1 text-xs font-medium capitalize `}
-								>
-									{currentProblem.difficulty}
-								</div>
-								{(solved || _solved) && (
-									<div className='rounded p-[3px] ml-4 text-lg transition-colors duration-200 text-green-s text-dark-green-s'>
-										<BsCheck2Circle />
+				<div className='px-5 w-full'>
+					{activeTab === 'description' && (
+						<div className='w-full'>
+							<div className='flex space-x-4'>
+								<div className='flex-1 mr-2 text-lg text-white font-medium'>{problem?.title}</div>
+							</div>
+							{!loading && currentProblem && (
+								<div className='flex items-center mt-3'>
+									<div
+										className={`${problemDifficultyClass} inline-block rounded-[21px] bg-opacity-[.15] px-2.5 py-1 text-xs font-medium capitalize `}
+									>
+										{currentProblem.difficulty}
 									</div>
-								)}
-								<div
-									className='flex items-center cursor-pointer hover:bg-dark-fill-3 space-x-1 rounded p-[3px]  ml-4 text-lg transition-colors duration-200 text-dark-gray-6'
-									onClick={handleLike}
-								>
-									{liked && !updating && <AiFillLike className='text-dark-blue-s' />}
-									{!liked && !updating && <AiFillLike />}
-									{updating && <AiOutlineLoading3Quarters className='animate-spin' />}
+									{(solved || _solved) && (
+										<div className='rounded p-[3px] ml-4 text-lg transition-colors duration-200 text-green-s text-dark-green-s'>
+											<BsCheck2Circle />
+										</div>
+									)}
+									<div
+										className='flex items-center cursor-pointer hover:bg-dark-fill-3 space-x-1 rounded p-[3px]  ml-4 text-lg transition-colors duration-200 text-dark-gray-6'
+										onClick={handleLike}
+									>
+										{liked && !updating && <AiFillLike className='text-dark-blue-s' />}
+										{!liked && !updating && <AiFillLike />}
+										{updating && <AiOutlineLoading3Quarters className='animate-spin' />}
 
-									<span className='text-xs'>{currentProblem.likes}</span>
-								</div>
-								<div
-									className='flex items-center cursor-pointer hover:bg-dark-fill-3 space-x-1 rounded p-[3px]  ml-4 text-lg transition-colors duration-200 text-green-s text-dark-gray-6'
-									onClick={handleDislike}
-								>
-									{disliked && !updating && <AiFillDislike className='text-dark-blue-s' />}
-									{!disliked && !updating && <AiFillDislike />}
-									{updating && <AiOutlineLoading3Quarters className='animate-spin' />}
+										<span className='text-xs'>{currentProblem.likes}</span>
+									</div>
+									<div
+										className='flex items-center cursor-pointer hover:bg-dark-fill-3 space-x-1 rounded p-[3px]  ml-4 text-lg transition-colors duration-200 text-green-s text-dark-gray-6'
+										onClick={handleDislike}
+									>
+										{disliked && !updating && <AiFillDislike className='text-dark-blue-s' />}
+										{!disliked && !updating && <AiFillDislike />}
+										{updating && <AiOutlineLoading3Quarters className='animate-spin' />}
 
-									<span className='text-xs'>{currentProblem.dislikes}</span>
-								</div>
-								<div
-									className='cursor-pointer hover:bg-dark-fill-3  rounded p-[3px]  ml-4 text-xl transition-colors duration-200 text-green-s text-dark-gray-6 '
-									onClick={handleStar}
-								>
-									{starred && !updating && <AiFillStar className='text-dark-yellow' />}
-									{!starred && !updating && <TiStarOutline />}
-									{updating && <AiOutlineLoading3Quarters className='animate-spin' />}
-								</div>
-							</div>
-						)}
-
-						{loading && (
-							<div className='mt-3 flex space-x-2'>
-								<RectangleSkeleton />
-								<CircleSkeleton />
-								<RectangleSkeleton />
-								<RectangleSkeleton />
-								<CircleSkeleton />
-							</div>
-						)}
-
-						{/* Problem Statement(paragraphs) */}
-						<div className='text-white text-sm'>
-							<div dangerouslySetInnerHTML={{ __html: problem.problemStatement }} />
-						</div>
-
-						{/* Examples */}
-						<div className='mt-4'>
-							{problem.examples.map((example, index) => (
-								<div key={example.id}>
-									<p className='font-medium text-white '>Example {index + 1}: </p>
-									{example.img && <img src={example.img} alt='' className='mt-3' />}
-									<div className='example-card'>
-										<pre>
-											<strong className='text-white'>Input: </strong> {example.inputText}
-											<br />
-											<strong>Output:</strong>
-											{example.outputText} <br />
-											{example.explanation && (
-												<>
-													<strong>Explanation:</strong> {example.explanation}
-												</>
-											)}
-										</pre>
+										<span className='text-xs'>{currentProblem.dislikes}</span>
+									</div>
+									<div
+										className='cursor-pointer hover:bg-dark-fill-3  rounded p-[3px]  ml-4 text-xl transition-colors duration-200 text-green-s text-dark-gray-6 '
+										onClick={handleStar}
+									>
+										{starred && !updating && <AiFillStar className='text-dark-yellow' />}
+										{!starred && !updating && <TiStarOutline />}
+										{updating && <AiOutlineLoading3Quarters className='animate-spin' />}
 									</div>
 								</div>
-							))}
-						</div>
+							)}
 
-						{/* Constraints */}
-						<div className='my-8 pb-4'>
-							<div className='text-white text-sm font-medium'>Constraints:</div>
-							<ul className='text-white ml-5 list-disc '>
-								<div dangerouslySetInnerHTML={{ __html: problem.constraints }} />
-							</ul>
+							{loading && (
+								<div className='mt-3 flex space-x-2'>
+									<RectangleSkeleton />
+									<CircleSkeleton />
+									<RectangleSkeleton />
+									<RectangleSkeleton />
+									<CircleSkeleton />
+								</div>
+							)}
+
+							{/* Problem Statement(paragraphs) */}
+							<div className='text-white text-sm'>
+								<div dangerouslySetInnerHTML={{ __html: problem.problemStatement }} />
+							</div>
+
+							{/* Examples */}
+							<div className='mt-4'>
+								{problem.examples.map((example, index) => (
+									<div key={example.id}>
+										<p className='font-medium text-white '>Example {index + 1}: </p>
+										{example.img && <img src={example.img} alt='' className='mt-3' />}
+										<div className='example-card'>
+											<pre>
+												<strong className='text-white'>Input: </strong> {example.inputText}
+												<br />
+												<strong>Output:</strong>
+												{example.outputText} <br />
+												{example.explanation && (
+													<>
+														<strong>Explanation:</strong> {example.explanation}
+													</>
+												)}
+											</pre>
+										</div>
+									</div>
+								))}
+							</div>
+
+							{/* Constraints */}
+							<div className='my-8 pb-4'>
+								<div className='text-white text-sm font-medium'>Constraints:</div>
+								<ul className='text-white ml-5 list-disc '>
+									<div dangerouslySetInnerHTML={{ __html: problem.constraints }} />
+								</ul>
+							</div>
 						</div>
-					</div>
+					)}
+					
+					{activeTab === 'discussion' && (
+						<div className="space-y-4">
+							<div className="flex justify-between items-center">
+								<h2 className="text-xl font-bold text-white">Discussion</h2>
+								<button 
+									onClick={() => setShowNewDiscussion(true)}
+									className="bg-dark-blue-s text-white px-4 py-2 rounded-lg hover:bg-dark-blue-s/80"
+								>
+									New Discussion
+								</button>
+							</div>
+
+							{showNewDiscussion && (
+								<div className="bg-dark-layer-2 p-4 rounded-lg">
+									<textarea
+										value={newDiscussionContent}
+										onChange={(e) => setNewDiscussionContent(e.target.value)}
+										className="w-full bg-dark-layer-3 text-white rounded-lg p-2"
+										rows={4}
+										placeholder="Start a new discussion..."
+									/>
+									<div className="flex justify-end gap-2 mt-2">
+										<button 
+											onClick={() => {
+												setShowNewDiscussion(false);
+												setNewDiscussionContent("");
+											}}
+											className="px-4 py-2 text-gray-400 hover:text-white"
+										>
+											Cancel
+										</button>
+										<button 
+											onClick={handleCreateDiscussion}
+											className="px-4 py-2 bg-dark-blue-s text-white rounded-lg hover:bg-dark-blue-s/80"
+										>
+											Post
+										</button>
+									</div>
+								</div>
+							)}
+
+							<DiscussionList 
+								discussions={discussions}
+								onVote={handleVote}
+								onReply={handleReply}
+							/>
+						</div>
+					)}
+
+					{activeTab === 'analytics' && (
+						<Analytics analytics={analytics} />
+					)}
+
+					{activeTab === 'leaderboard' && (
+						<div className="space-y-4">
+							<h2 className="text-xl font-bold text-white">Top Performers</h2>
+							<Leaderboard entries={leaderboardEntries} />
+						</div>
+					)}
 				</div>
 			</div>
 		</div>
 	);
 };
+
 export default ProblemDescription;
 
 function useGetCurrentProblem(problemId: string) {

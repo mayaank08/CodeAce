@@ -30,3 +30,58 @@ export type DBProblem = {
 	videoId?: string;
 	link?: string;
 };
+
+export type Discussion = {
+	id: string;
+	problemId: string;
+	userId: string;
+	userName: string;
+	content: string;
+	votes: number;
+	createdAt: Date;
+	replies: Reply[];
+};
+
+export type Reply = {
+	id: string;
+	discussionId: string;
+	userId: string;
+	userName: string;
+	content: string;
+	votes: number;
+	createdAt: Date;
+};
+
+export type UserAnalytics = {
+	userId: string;
+	problemsSolved: number;
+	totalTimeSpent: number;
+	averageTimePerProblem: number;
+	successRate: number;
+	difficultyBreakdown: {
+		easy: number;
+		medium: number;
+		hard: number;
+	};
+	streakDays: number;
+	points: number;
+	rank: string;
+	badges: Badge[];
+};
+
+export type Badge = {
+	id: string;
+	name: string;
+	description: string;
+	icon: string;
+	unlockedAt: Date;
+};
+
+export type LeaderboardEntry = {
+	userId: string;
+	userName: string;
+	points: number;
+	rank: number;
+	problemsSolved: number;
+	streakDays: number;
+};
