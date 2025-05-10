@@ -1,3 +1,8 @@
+##Intro 
+
+CodeAce is a curated coding practice platform that emphasizes quality over quantity. It offers handpicked algorithm problems categorized by topic and difficulty, with clean UI and integrated video solutions to accelerate your interview prep. Perfect for focused, effective learning.
+
+
 This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
 
 ## Getting Started
