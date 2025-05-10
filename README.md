@@ -1,4 +1,4 @@
-## Introduction 
+## Introduction
 
 CodeAce is a curated coding practice platform that emphasizes quality over quantity. It offers handpicked algorithm problems categorized by topic and difficulty, with clean UI and integrated video solutions to accelerate your interview prep. Perfect for focused, effective learning.
 
